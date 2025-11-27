@@ -371,15 +371,12 @@ PATH_BOOST_RULES = {
   玩家手册/法师 (0.85-0.15=0.70) 📜 → 排名第2
 ```
 
-📖 **详细文档**：[docs/version_priority.md](docs/version_priority.md)
 
 #### 2. 路径加权与排除
 
 **功能**：支持正向加权（提升）和负向加权（降低），以及完全排除特定路径。
 
 **说明**：Credits 路径包含官方说明、鸣谢、规则总览等重要内容。
-
-📖 **详细文档**：[docs/path_boosting.md](docs/path_boosting.md)
 
 #### 3. 启用语义相似度过滤
 
