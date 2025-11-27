@@ -63,7 +63,7 @@ class GeminiAgentExecutor:
     def _calculate_semantic_similarity(self, query: str, doc: Document) -> float:
         """
         使用 embedding 模型计算查询与文档的语义相似度
-        支持基于路径的相似度加权
+        支持基于路径的相似度加权（正向加权和负向降权）
         
         Args:
             query: 用户查询
@@ -71,9 +71,20 @@ class GeminiAgentExecutor:
             
         Returns:
             相似度分数 (0-1)，可能经过路径加权调整
+            如果文档被排除，返回 -1.0
         """
         if not self.embedding_model:
             return 1.0  # 如果没有 embedding 模型，默认全部通过
+        
+        full_path = doc.metadata.get('full_path', '')
+        
+        # 🆕 路径排除：如果启用且文档路径匹配排除规则，直接返回 -1
+        if getattr(config, 'ENABLE_PATH_EXCLUSION', False):
+            exclusion_rules = getattr(config, 'PATH_EXCLUSION_RULES', [])
+            for exclusion_keyword in exclusion_rules:
+                if exclusion_keyword in full_path:
+                    # print(f"[Agent] 路径排除: {full_path} 匹配 '{exclusion_keyword}'，跳过")
+                    return -1.0  # 标记为排除
         
         try:
             # 获取查询和文档的 embedding
@@ -89,16 +100,25 @@ class GeminiAgentExecutor:
             similarity = np.dot(query_vec, doc_vec) / (np.linalg.norm(query_vec) * np.linalg.norm(doc_vec))
             base_similarity = float(similarity)
             
-            # 🆕 路径加权：如果启用且文档路径匹配规则，则提升相似度
+            # 🆕 路径加权：支持正向加权（提升）和负向加权（降低）
             if getattr(config, 'ENABLE_PATH_BOOSTING', False):
                 boost_rules = getattr(config, 'PATH_BOOST_RULES', {})
-                full_path = doc.metadata.get('full_path', '')
                 
                 for path_keyword, boost_value in boost_rules.items():
                     if path_keyword in full_path:
-                        boosted_similarity = min(1.0, base_similarity + boost_value)
+                        # 应用加权（正值提升，负值降低）
+                        boosted_similarity = base_similarity + boost_value
+                        # 确保相似度在 [0, 1] 范围内
+                        boosted_similarity = max(0.0, min(1.0, boosted_similarity))
+                        
                         # 调试信息（可选）
-                        # print(f"[Agent] 路径加权: {full_path} 匹配 '{path_keyword}', {base_similarity:.3f} → {boosted_similarity:.3f}")
+                        if boost_value >= 0:
+                            # print(f"[Agent] 路径加权↑: {full_path[:50]}... 匹配 '{path_keyword}', {base_similarity:.3f} → {boosted_similarity:.3f} (+{boost_value})")
+                            pass
+                        else:
+                            # print(f"[Agent] 路径降权↓: {full_path[:50]}... 匹配 '{path_keyword}', {base_similarity:.3f} → {boosted_similarity:.3f} ({boost_value})")
+                            pass
+                        
                         return boosted_similarity
             
             return base_similarity
@@ -333,6 +353,7 @@ class GeminiAgentExecutor:
     def _filter_docs_by_similarity(self, query: str, docs: List[Document], threshold: float = 0.5, mode: str = "rank") -> List[Document]:
         """
         基于语义相似度过滤或排序文档
+        同时处理路径排除规则
         
         Args:
             query: 用户查询
@@ -357,13 +378,24 @@ class GeminiAgentExecutor:
         
         # 计算所有文档与查询的相似度
         doc_scores = []
+        excluded_count = 0
+        
         for i, doc in enumerate(docs):
             similarity = self._calculate_semantic_similarity(query, doc)
+            
+            # 相似度为 -1 表示被排除
+            if similarity < 0:
+                excluded_count += 1
+                continue
+            
             doc_scores.append({
                 'doc': doc,
                 'similarity': similarity,
                 'index': i
             })
+        
+        if excluded_count > 0:
+            print(f"[Agent] 路径排除: 已过滤 {excluded_count} 个不符合条件的文档")
         
         if mode == "rank":
             # 按相似度降序排序
@@ -375,11 +407,19 @@ class GeminiAgentExecutor:
                 title = item['doc'].metadata.get('source_title', '未知')
                 full_path = item['doc'].metadata.get('full_path', '未知')
                 category = full_path.split('/')[0] if '/' in full_path else '未知'
-                print(f"  {rank}. [{category}] {title[:40]}... 相似度={item['similarity']:.3f}")
+                
+                # 标注版本信息
+                version_tag = ""
+                if "2024" in full_path or "2025" in full_path:
+                    version_tag = " 🆕"
+                elif any(old in full_path for old in ["玩家手册/", "城主指南/", "怪物图鉴/"]):
+                    version_tag = " 📜"
+                
+                print(f"  {rank}. [{category}]{version_tag} {title[:35]}... 相似度={item['similarity']:.3f}")
             
             # 返回排序后的文档
             filtered_docs = [item['doc'] for item in doc_scores]
-            print(f"\n[Agent] 语义排序完成: {len(docs)} 个文档")
+            print(f"\n[Agent] 语义排序完成: {len(docs)} 个文档 → {len(filtered_docs)} 个文档（已排除 {excluded_count} 个）")
             
         else:  # mode == "threshold"
             # 按阈值过滤
@@ -394,7 +434,7 @@ class GeminiAgentExecutor:
                 else:
                     print(" ✗ 过滤")
             
-            print(f"[Agent] 语义过滤: {len(docs)} 个文档 → {len(filtered_docs)} 个文档")
+            print(f"[Agent] 语义过滤: {len(docs)} 个文档 → {len(filtered_docs)} 个文档（已排除 {excluded_count} 个）")
         
         return filtered_docs
     
