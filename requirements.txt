@@ -1,0 +1,40 @@
+# DND 规则 AI 助手 - 依赖包列表 (Gemini 版本)
+
+# 核心框架
+langchain>=0.1.0
+langchain-core>=0.1.0
+langchain-community>=0.0.20
+langchain-classic>=1.0.0
+langchain-text-splitters>=0.0.1
+python-dotenv>=1.2.1
+# LLM 提供商
+langchain-google-genai>=1.0.0
+langchain-openai>=0.0.5
+
+# Hugging Face Embeddings
+langchain-huggingface>=0.0.1
+sentence-transformers>=2.2.0
+
+# 向量存储
+chromadb>=0.4.0
+
+# 网络请求（固定版本避免冲突）
+urllib3==2.2.3
+
+# 文本处理
+beautifulsoup4>=4.12.0
+html2text>=2020.1.16
+chardet>=5.0.0
+lxml>=4.9.0
+
+# 关键词检索与机器学习
+scikit-learn>=1.3.0
+
+# JSON 处理
+jq>=1.4.0
+
+# PyTorch (可选，用于 GPU 加速 Embeddings)
+torch >= 2.9.1
+
+# 工具
+python-dotenv>=1.0.0

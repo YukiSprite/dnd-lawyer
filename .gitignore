@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 项目特定
+chm_source/
+data/
+vector_store/
+config/data_processing.json
+config/chm_structure_preview.txt
+
+# 日志文件
+logs/
+*.log
+
+# 敏感信息
+.env
+.env.local
+*.key
+!.env.example
+
+# 模型缓存（HuggingFace 模型文件较大）
+models_cache/
+.cache/
+transformers_cache/
+
+# 临时文件
+*.tmp
+*.bak
+.DS_Store
