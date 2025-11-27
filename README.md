@@ -32,7 +32,11 @@ pip install -r requirements.txt
 ```
 
 #### 步骤 2：配置 API
-将.env.example重命名为.env，然后按照如下步骤进行配置
+将.env.example重命名为.env，
+```bash
+cp .env.example .env
+```
+然后按照如下步骤进行配置
 
 ```
 # 选择 API 提供商
@@ -421,6 +425,7 @@ Error: API request failed
    ```
 
 2. **验证配置项**
+    配置项可以不写在api_config.py中，也可以写在你的.env文件中
    - `API_PROVIDER` 是否正确（"google" 或 "openai"）
    - `API_BASE_URL` 是否正确（OpenAI 模式必填）
    - `API_KEY` 是否有效
@@ -583,7 +588,7 @@ dnd-lawyer/
 
 | 模块 | 功能 | 说明 |
 |------|------|------|
-| **config/api_config.py** | API 配置中心 | 统一管理 API Key、模型选择和 Embedding 配置 |
+| **config/api_config.py** | API 配置中心 | 统一管理 API Key、模型选择和 Embedding 配置(当前版本中，这个功能被集成到了/.env文件中) |
 | **src/llm_gemini.py** | LLM 初始化 | 创建 Gemini LLM 实例（支持 Google 和 OpenAI 模式） |
 | **src/agent_gemini.py** | Agent 逻辑 | 实现检索-生成流程，支持语义过滤和动态文档数量 |
 | **src/parent_retriever.py** | 父文档检索器 | 小块检索 + 完整父文档返回策略 |
