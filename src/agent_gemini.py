@@ -305,7 +305,7 @@ class GeminiAgentExecutor:
             new_retrieve_count = len(initial_docs) * (retrieve_multiplier ** attempt)
             new_retrieve_count = min(new_retrieve_count, 200)  # 提高上限
             
-            print(f"\n[Agent] 第 {attempt} 轮：还需 {needed} 个文档，正在检索 {new_retrieve_count} 个候选...")
+            # print(f"\n[Agent] 第 {attempt} 轮：还需 {needed} 个文档，正在检索 {new_retrieve_count} 个候选...")
             
             try:
                 # 🔧 关键修复：直接从 ParentDocumentRetriever 的 vectorstore 检索更多子文档
@@ -350,7 +350,7 @@ class GeminiAgentExecutor:
                 # 按相似度排序
                 new_candidates.sort(key=lambda x: x[1], reverse=True)
                 
-                print(f"[Agent] 获取到 {len(new_candidates)} 个新候选文档")
+                # print(f"[Agent] 获取到 {len(new_candidates)} 个新候选文档")
                 
                 # 处理新候选文档
                 added_in_round = 0
@@ -369,7 +369,7 @@ class GeminiAgentExecutor:
                         
                         if doc_similarity >= similarity_threshold:
                             kept_title = kept_doc.metadata.get('source_title', '未知')[:40]
-                            print(f"  ✗ 跳过: {current_title}...与{kept_title} (相似度={doc_similarity:.3f})")
+                            # print(f"  ✗ 跳过: {current_title}...与{kept_title} (相似度={doc_similarity:.3f})")
                             is_duplicate = True
                             skipped_count += 1
                             break
@@ -378,7 +378,8 @@ class GeminiAgentExecutor:
                         unique_docs.append(doc)
                         added_in_round += 1
                         if added_in_round <= 5:
-                            print(f"  ✓ 新增: {current_title}... (与查询相似度={sim:.3f})")
+                            # print(f"  ✓ 新增: {current_title}... (与查询相似度={sim:.3f})")
+                            pass
                 
                 print(f"[Agent] 第 {attempt} 轮完成: 新增 {added_in_round} 个独特文档，当前共 {len(unique_docs)} 个")
                 
@@ -393,16 +394,17 @@ class GeminiAgentExecutor:
         final_count = len(unique_docs)
         total_checked = len(all_checked_docs)
         
-        print(f"\n[Agent] ✓ 去重与补充完成:")
-        print(f"    - 检查了 {total_checked} 个文档")
-        print(f"    - 保留了 {final_count} 个独特文档")
-        print(f"    - 移除了 {skipped_count} 个重复文档")
-        print(f"    - 达成率: {final_count}/{target_count} ({final_count/target_count*100:.1f}%)")
+        # print(f"\n[Agent] ✓ 去重与补充完成:")
+        # print(f"    - 检查了 {total_checked} 个文档")
+        # print(f"    - 保留了 {final_count} 个独特文档")
+        # print(f"    - 移除了 {skipped_count} 个重复文档")
+        # print(f"    - 达成率: {final_count}/{target_count} ({final_count/target_count*100:.1f}%)")
         
         if final_count < target_count:
-            print(f"[Agent] ⚠️  未能达到目标数量，可能需要：")
-            print(f"    1. 降低相似度阈值 (当前: {similarity_threshold})")
-            print(f"    2. 增加初始检索数量 (当前: {len(initial_docs)})")
+            # print(f"[Agent] ⚠️  未能达到目标数量，可能需要：")
+            # print(f"    1. 降低相似度阈值 (当前: {similarity_threshold})")
+            # print(f"    2. 增加初始检索数量 (当前: {len(initial_docs)})")
+            pass
         
         return unique_docs
     
