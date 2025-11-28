@@ -15,7 +15,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from config import config
 
 # Agent 提示词模板
-GEMINI_AGENT_TEMPLATE = """你是一个专业的 DND 规则专家助手。
+GEMINI_AGENT_TEMPLATE = """你是一个专业的 Pathfinder 规则专家助手。
 
 你的任务是基于提供的规则文档，准确、详细地回答用户的问题。
 
@@ -77,6 +77,7 @@ class GeminiAgentExecutor:
             return 1.0  # 如果没有 embedding 模型，默认全部通过
         
         full_path = doc.metadata.get('full_path', '')
+        source_title = doc.metadata.get('source_title', '')
         
         # 🆕 路径排除：如果启用且文档路径匹配排除规则，直接返回 -1
         if getattr(config, 'ENABLE_PATH_EXCLUSION', False):
@@ -87,20 +88,47 @@ class GeminiAgentExecutor:
                     return -1.0  # 标记为排除
         
         try:
-            # 获取查询和文档的 embedding
+            # 获取查询的 embedding
             query_embedding = self.embedding_model.embed_query(query)
-
-            doc_text = doc.page_content[:]
-            doc_embedding = self.embedding_model.embed_query(doc_text)
             
-            # 计算余弦相似度
-            query_vec = np.array(query_embedding)
-            doc_vec = np.array(doc_embedding)
+            # 🔧 改进：综合计算标题、路径和内容的相似度
+            # 1. 计算与标题的相似度（权重最高，因为标题最能代表文档主题）
+            title_similarity = 0.0
+            if source_title:
+                title_embedding = self.embedding_model.embed_query(source_title)
+                title_vec = np.array(title_embedding)
+                query_vec = np.array(query_embedding)
+                title_similarity = float(np.dot(query_vec, title_vec) / (np.linalg.norm(query_vec) * np.linalg.norm(title_vec)))
             
-            similarity = np.dot(query_vec, doc_vec) / (np.linalg.norm(query_vec) * np.linalg.norm(doc_vec))
-            base_similarity = float(similarity)
+            # 2. 计算与路径最后部分的相似度（包含具体条目名称）
+            path_similarity = 0.0
+            if full_path:
+                # 取路径的最后一个部分（通常是具体条目名称）
+                path_last_part = full_path.split('/')[-1] if '/' in full_path else full_path
+                path_embedding = self.embedding_model.embed_query(path_last_part)
+                path_vec = np.array(path_embedding)
+                query_vec = np.array(query_embedding)
+                path_similarity = float(np.dot(query_vec, path_vec) / (np.linalg.norm(query_vec) * np.linalg.norm(path_vec)))
             
-            # 🆕 路径加权：支持正向加权（提升）和负向加权（降低）
+            # 3. 计算与内容摘要的相似度（取前500字符，避免噪音）
+            content_similarity = 0.0
+            doc_text = doc.page_content[:500]
+            if doc_text:
+                doc_embedding = self.embedding_model.embed_query(doc_text)
+                doc_vec = np.array(doc_embedding)
+                query_vec = np.array(query_embedding)
+                content_similarity = float(np.dot(query_vec, doc_vec) / (np.linalg.norm(query_vec) * np.linalg.norm(doc_vec)))
+            
+            # 4. 综合相似度：标题 > 路径 > 内容
+            # 使用加权平均，优先考虑标题匹配
+            base_similarity = max(
+                title_similarity * 1.5,      # 标题完全匹配最重要
+                path_similarity * 0.8,      # 路径匹配
+                content_similarity * 0.8,    # 内容匹配权重稍低
+                (title_similarity * 0.5 + path_similarity * 0.3 + content_similarity * 0.2)  # 加权平均
+            )
+            
+            # 路径加权：支持正向加权（提升）和负向加权（降低）
             if getattr(config, 'ENABLE_PATH_BOOSTING', False):
                 boost_rules = getattr(config, 'PATH_BOOST_RULES', {})
                 
@@ -113,10 +141,10 @@ class GeminiAgentExecutor:
                         
                         # 调试信息（可选）
                         if boost_value >= 0:
-                            # print(f"[Agent] 路径加权↑: {full_path[:50]}... 匹配 '{path_keyword}', {base_similarity:.3f} → {boosted_similarity:.3f} (+{boost_value})")
+                            print(f"[Agent] 路径加权↑: {full_path[:50]}... 匹配 '{path_keyword}', {base_similarity:.3f} → {boosted_similarity:.3f} (+{boost_value})")
                             pass
                         else:
-                            # print(f"[Agent] 路径降权↓: {full_path[:50]}... 匹配 '{path_keyword}', {base_similarity:.3f} → {boosted_similarity:.3f} ({boost_value})")
+                            print(f"[Agent] 路径降权↓: {full_path[:50]}... 匹配 '{path_keyword}', {base_similarity:.3f} → {boosted_similarity:.3f} ({boost_value})")
                             pass
                         
                         return boosted_similarity
@@ -129,6 +157,7 @@ class GeminiAgentExecutor:
     def _calculate_doc_to_doc_similarity(self, doc1: Document, doc2: Document) -> float:
         """
         计算两个文档之间的相似度
+        综合考虑标题和内容，避免结构相似但主题不同的文档被误判为重复
         
         Args:
             doc1: 文档1
@@ -141,20 +170,48 @@ class GeminiAgentExecutor:
             return 0.0
         
         try:
-            # 获取两个文档的 embedding
-            doc1_text = doc1.page_content[:1000]  # 限制长度以加快计算
-            doc2_text = doc2.page_content[:1000]
+            # 获取两个文档的标题
+            title1 = doc1.metadata.get('source_title', '')
+            title2 = doc2.metadata.get('source_title', '')
+            
+            # 🔧 改进：首先比较标题相似度
+            # 如果标题明显不同，则认为不是重复文档
+            title_similarity = 0.0
+            if title1 and title2:
+                title1_embedding = self.embedding_model.embed_query(title1)
+                title2_embedding = self.embedding_model.embed_query(title2)
+                
+                vec1 = np.array(title1_embedding)
+                vec2 = np.array(title2_embedding)
+                
+                title_similarity = float(np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2)))
+                
+                # 如果标题相似度低于阈值，直接判定为不重复
+                # 避免 "气化形体" 和 "黑暗视觉" 这种标题完全不同的法术被误判
+                if title_similarity < 0.75:
+                    return title_similarity  # 返回较低的标题相似度
+            
+            # 计算内容相似度（取更多内容以获取效果描述）
+            doc1_text = doc1.page_content[:1500]
+            doc2_text = doc2.page_content[:1500]
             
             doc1_embedding = self.embedding_model.embed_query(doc1_text)
             doc2_embedding = self.embedding_model.embed_query(doc2_text)
             
-            # 计算余弦相似度
             vec1 = np.array(doc1_embedding)
             vec2 = np.array(doc2_embedding)
             
-            similarity = np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+            content_similarity = float(np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2)))
             
-            return float(similarity)
+            # 综合相似度：标题权重更高
+            # 只有标题和内容都相似时，才判定为重复文档
+            combined_similarity = min(
+                title_similarity * 0.6 + content_similarity * 0.4,  # 加权平均
+                title_similarity + 0.15  # 标题不同时，限制最高相似度
+            )
+            
+            return combined_similarity
+            
         except Exception as e:
             print(f"[Agent] 计算文档间相似度时出错: {e}")
             return 0.0
@@ -219,8 +276,7 @@ class GeminiAgentExecutor:
                 if doc_similarity >= similarity_threshold:
                     # 发现重复文档
                     kept_title = kept_doc.metadata.get('source_title', '未知')[:40]
-                    if i < 10:  # 只显示前10个，避免输出过多
-                        print(f"  ✗ 跳过: {current_title}... (相似度={doc_similarity:.3f}, 重复)")
+                    print(f"  ✗ 跳过: {current_title}... 与 {kept_title} (相似度={doc_similarity:.3f}, 重复)")
                     is_duplicate = True
                     skipped_count += 1
                     break
@@ -312,8 +368,8 @@ class GeminiAgentExecutor:
                         doc_similarity = self._calculate_doc_to_doc_similarity(doc, kept_doc)
                         
                         if doc_similarity >= similarity_threshold:
-                            if added_in_round < 5:  # 只显示前几个
-                                print(f"  ✗ 跳过: {current_title}... (相似度={doc_similarity:.3f})")
+                            kept_title = kept_doc.metadata.get('source_title', '未知')[:40]
+                            print(f"  ✗ 跳过: {current_title}...与{kept_title} (相似度={doc_similarity:.3f})")
                             is_duplicate = True
                             skipped_count += 1
                             break

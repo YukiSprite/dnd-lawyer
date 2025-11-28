@@ -23,6 +23,14 @@
   - 增加 clean_node_name 函数, 智能清理 config.json 中的键 (key)。
   - 解决因键名包含 "::" 或 "path/..." 导致的 full_path 重复问题。
   - 自动移除键名中的 .html / .htm 后缀。
+
+- V6 改进 (基于 V5):
+  - 新增法术和专长文件的自动识别功能。
+  - 法术文件自动按 <B><SPAN style="COLOR: #cc00cc">法术名</SPAN></B> 模式切分。
+  - 专长文件自动按 <SPAN class=bbc_size style="FONT-SIZE: 12pt"><STRONG>专长名</STRONG></SPAN> 
+    或 <SPAN class=bbc_color style="COLOR: brown"><STRONG>专长名</STRONG></SPAN> 模式切分。
+  - 对于无法识别的专长文件，尝试按 <HR> 标签切分。
+  - 每个法术/专长将被独立提取为一个文档条目，便于精准检索。
 """
 
 import os
@@ -34,6 +42,7 @@ import chardet  # 用于编码检测
 import logging
 import re  # 导入正则表达式
 from typing import List, Dict, Any, Optional
+from urllib.parse import unquote  # 用于 URL 解码
 
 # --- 全局配置 ---
 
@@ -43,6 +52,25 @@ CONFIG_FILE = Path("./config/data_processing.json")
 # 单个文档的最大字符数阈值（超过此值将尝试自动切分）
 # 降低到 20K 以避免上下文超限（4个文档 * 20K ≈ 50K tokens，远低于128K限制）
 MAX_DOC_SIZE = 20000  # 20KB，约 2 万字符（≈13K tokens）
+
+# --- 法术和专长的标题识别模式 ---
+# 法术标题模式: <B><SPAN style="...COLOR: #cc00cc...">法术名 (English Name)</SPAN></B>
+SPELL_TITLE_PATTERN = re.compile(
+    r'(<B[^>]*>\s*<SPAN[^>]*COLOR:\s*#cc00cc[^>]*>.*?</SPAN>\s*</B>)',
+    re.IGNORECASE | re.DOTALL
+)
+
+# 专长标题模式1: <SPAN class=bbc_size style="FONT-SIZE: 12pt"><STRONG>专长名</STRONG>
+FEAT_TITLE_PATTERN_1 = re.compile(
+    r'(<SPAN\s+class=bbc_size\s+style="FONT-SIZE:\s*12pt">\s*<STRONG>.*?</STRONG>.*?</SPAN>)',
+    re.IGNORECASE | re.DOTALL
+)
+
+# 专长标题模式2: <SPAN class=bbc_color style="COLOR: brown"><STRONG>
+FEAT_TITLE_PATTERN_2 = re.compile(
+    r'(<SPAN\s+class=bbc_color\s+style="COLOR:\s*brown">\s*<STRONG>.*?</STRONG>.*?</SPAN>)',
+    re.IGNORECASE | re.DOTALL
+)
 
 # --- 日志配置 ---
 # 确保 logs 目录存在
@@ -215,6 +243,202 @@ def clean_node_name(node_name: str) -> str:
     return name.strip()
 
 
+def detect_content_type(source_file: str, content_html: str) -> Optional[str]:
+    """
+    [V6 新增] 自动检测内容类型（法术/专长），返回合适的切分模式。
+    
+    Args:
+        source_file: 源文件名
+        content_html: HTML 内容字符串
+        
+    Returns:
+        'spell', 'feat', 或 None
+    """
+    if not source_file:
+        return None
+    
+    file_lower = source_file.lower()
+    
+    # 根据文件名判断
+    if 'spell' in file_lower:
+        # 检查是否包含法术标题模式
+        spell_matches = SPELL_TITLE_PATTERN.findall(content_html)
+        if len(spell_matches) >= 2:
+            return 'spell'
+    
+    if '专长' in file_lower or 'feat' in file_lower:
+        # 检查是否包含专长标题模式
+        feat_matches_1 = FEAT_TITLE_PATTERN_1.findall(content_html)
+        feat_matches_2 = FEAT_TITLE_PATTERN_2.findall(content_html)
+        if len(feat_matches_1) >= 2 or len(feat_matches_2) >= 2:
+            return 'feat'
+    
+    return None
+
+
+def split_by_spell_pattern(content_html: str, cleaned_node_name: str, full_path_str: str, source_file: str) -> List[Dict[str, Any]]:
+    """
+    [V6 新增] 按法术标题模式切分内容。
+    
+    法术标题格式: <B><SPAN style="...COLOR: #cc00cc...">法术名 (English Name)</SPAN></B>
+    """
+    results = []
+    
+    # 使用法术标题模式进行切分
+    html_chunks = SPELL_TITLE_PATTERN.split(content_html)
+    
+    if len(html_chunks) <= 1:
+        logging.warning(f"  -> 法术模式未找到匹配，回退到普通处理")
+        return []
+    
+    logging.info(f"  -> 使用法术标题模式切分 (找到 {len(html_chunks) // 2} 个法术)")
+    
+    # 处理概述部分 (第一个法术之前的内容)
+    chunk_0_html = html_chunks[0]
+    chunk_0_md = convert_html_to_mixed_format(chunk_0_html)
+    
+    if chunk_0_md and len(chunk_0_md.strip()) > 50:  # 只有内容足够多才保留
+        chunk_0_title = f"{cleaned_node_name} (概述)"
+        chunk_0_full_path = f"{full_path_str}/{chunk_0_title}"
+        entry = create_data_entry(chunk_0_md, chunk_0_full_path, chunk_0_title, f"{source_file}#overview")
+        results.append(entry)
+        logging.debug(f"    -> 已分割: {chunk_0_full_path} (概述)")
+    
+    # 处理各个法术
+    for i in range(1, len(html_chunks), 2):
+        tag_html = html_chunks[i]  # 法术标题标签
+        content_after_tag_html = html_chunks[i + 1] if (i + 1) < len(html_chunks) else ""
+        
+        # 完整的块 = 标题 + 标题后的内容
+        full_chunk_html = tag_html + content_after_tag_html
+        chunk_md = convert_html_to_mixed_format(full_chunk_html)
+        
+        # 从标题中提取法术名
+        try:
+            chunk_soup = BeautifulSoup(tag_html, 'html.parser')
+            span_tag = chunk_soup.find('span')
+            if span_tag:
+                chunk_title = span_tag.get_text(strip=True)
+            else:
+                chunk_title = f"法术 {i // 2 + 1}"
+        except Exception as e:
+            logging.warning(f"  -> 解析法术标题失败: {e}")
+            chunk_title = f"法术 {i // 2 + 1}"
+        
+        if not chunk_title.strip():
+            chunk_title = f"法术 {i // 2 + 1}"
+        
+        if chunk_md:
+            chunk_full_path = f"{full_path_str}/{chunk_title}"
+            chunk_source_file = f"{source_file}#{chunk_title.replace(' ', '_').replace('/', '_')}"
+            
+            entry = create_data_entry(chunk_md, chunk_full_path, chunk_title, chunk_source_file)
+            results.append(entry)
+            logging.debug(f"    -> 已分割法术: {chunk_title}")
+    
+    return results
+
+
+def split_by_feat_pattern(content_html: str, cleaned_node_name: str, full_path_str: str, source_file: str) -> List[Dict[str, Any]]:
+    """
+    [V6 新增] 按专长标题模式切分内容。
+    
+    专长标题格式1: <SPAN class=bbc_size style="FONT-SIZE: 12pt"><STRONG>专长名</STRONG>...
+    专长标题格式2: <SPAN class=bbc_color style="COLOR: brown"><STRONG>...
+    """
+    results = []
+    
+    # 首先尝试使用模式1
+    html_chunks = FEAT_TITLE_PATTERN_1.split(content_html)
+    pattern_used = "模式1 (bbc_size)"
+    
+    # 如果模式1不够多，尝试模式2
+    if len(html_chunks) <= 3:  # 不足2个专长
+        html_chunks_2 = FEAT_TITLE_PATTERN_2.split(content_html)
+        if len(html_chunks_2) > len(html_chunks):
+            html_chunks = html_chunks_2
+            pattern_used = "模式2 (bbc_color brown)"
+    
+    # 如果两种模式都不够，尝试更宽松的模式：<STRONG>...</STRONG> 后面跟着换行或特定内容
+    if len(html_chunks) <= 3:
+        # 尝试更通用的专长模式：以 <HR> 分隔的专长块
+        hr_pattern = re.compile(r'(<HR[^>]*>)', re.IGNORECASE)
+        hr_chunks = hr_pattern.split(content_html)
+        if len(hr_chunks) > len(html_chunks):
+            html_chunks = hr_chunks
+            pattern_used = "HR 分隔"
+    
+    if len(html_chunks) <= 1:
+        logging.warning(f"  -> 专长模式未找到匹配，回退到普通处理")
+        return []
+    
+    logging.info(f"  -> 使用专长{pattern_used}切分 (找到 {len(html_chunks) // 2} 个专长)")
+    
+    # 处理概述部分 (第一个专长之前的内容)
+    chunk_0_html = html_chunks[0]
+    chunk_0_md = convert_html_to_mixed_format(chunk_0_html)
+    
+    if chunk_0_md and len(chunk_0_md.strip()) > 50:  # 只有内容足够多才保留
+        chunk_0_title = f"{cleaned_node_name} (概述)"
+        chunk_0_full_path = f"{full_path_str}/{chunk_0_title}"
+        entry = create_data_entry(chunk_0_md, chunk_0_full_path, chunk_0_title, f"{source_file}#overview")
+        results.append(entry)
+        logging.debug(f"    -> 已分割: {chunk_0_full_path} (概述)")
+    
+    # 处理各个专长
+    for i in range(1, len(html_chunks), 2):
+        tag_html = html_chunks[i]  # 专长标题标签或分隔符
+        content_after_tag_html = html_chunks[i + 1] if (i + 1) < len(html_chunks) else ""
+        
+        # 完整的块 = 标题 + 标题后的内容
+        full_chunk_html = tag_html + content_after_tag_html
+        chunk_md = convert_html_to_mixed_format(full_chunk_html)
+        
+        # 从标题中提取专长名
+        try:
+            chunk_soup = BeautifulSoup(tag_html, 'html.parser')
+            # 优先从 STRONG 标签获取
+            strong_tag = chunk_soup.find('strong')
+            if strong_tag:
+                chunk_title = strong_tag.get_text(strip=True)
+            else:
+                # 如果是 HR 分隔，从后面的内容中提取标题
+                if pattern_used == "HR 分隔":
+                    after_soup = BeautifulSoup(content_after_tag_html[:500], 'html.parser')
+                    strong_in_content = after_soup.find('strong')
+                    if strong_in_content:
+                        chunk_title = strong_in_content.get_text(strip=True)
+                    else:
+                        chunk_title = f"专长 {i // 2 + 1}"
+                else:
+                    span_tag = chunk_soup.find('span')
+                    if span_tag:
+                        chunk_title = span_tag.get_text(strip=True)
+                    else:
+                        chunk_title = f"专长 {i // 2 + 1}"
+        except Exception as e:
+            logging.warning(f"  -> 解析专长标题失败: {e}")
+            chunk_title = f"专长 {i // 2 + 1}"
+        
+        if not chunk_title.strip():
+            chunk_title = f"专长 {i // 2 + 1}"
+        
+        # 清理标题中的多余内容
+        chunk_title = chunk_title.split('\n')[0].strip()  # 只取第一行
+        if len(chunk_title) > 100:  # 标题太长，截断
+            chunk_title = chunk_title[:100] + "..."
+        
+        if chunk_md:
+            chunk_full_path = f"{full_path_str}/{chunk_title}"
+            chunk_source_file = f"{source_file}#{chunk_title.replace(' ', '_').replace('/', '_')}"
+            
+            entry = create_data_entry(chunk_md, chunk_full_path, chunk_title, chunk_source_file)
+            results.append(entry)
+            logging.debug(f"    -> 已分割专长: {chunk_title}")
+    
+    return results
+
+
 # --- 核心递归处理函数 ---
 
 def process_node(
@@ -246,7 +470,14 @@ def process_node(
     new_path_parts = current_path_parts + [cleaned_node_name]  # <-- V5 change
     full_path_str = "/".join(new_path_parts)
     source_file = node_config.get("source_file")
-    html_path = (chm_source_dir / source_file).resolve() if source_file else None
+    
+    # [V6 修复] 对文件名进行 URL 解码，处理 %20 等编码字符
+    if source_file:
+        source_file_decoded = unquote(source_file)
+    else:
+        source_file_decoded = None
+    
+    html_path = (chm_source_dir / source_file_decoded).resolve() if source_file_decoded else None
 
     # --- 3. 处理本节点 (如果 Action 不是 'skip_children_only') ---
     if action == "process" and html_path:
@@ -280,8 +511,35 @@ def process_node(
                 # [V3: 将选中的内容转为字符串, 准备用Regex处理]
                 content_html_str = str(content_soup)
 
+                # --- [V6 新增] 自动检测法术/专长文件并切分 ---
+                content_type = detect_content_type(source_file_decoded or "", content_html_str)
+                
+                if content_type == 'spell':
+                    logging.info(f"  -> 检测到法术文件，使用法术标题模式切分")
+                    spell_results = split_by_spell_pattern(content_html_str, cleaned_node_name, full_path_str, source_file_decoded or "")
+                    if spell_results:
+                        results.extend(spell_results)
+                    else:
+                        # 如果法术切分失败，回退到普通处理
+                        logging.warning(f"  -> 法术切分失败，回退到普通处理")
+                        content_type = None  # 重置以便继续普通处理
+                
+                elif content_type == 'feat':
+                    logging.info(f"  -> 检测到专长文件，使用专长标题模式切分")
+                    feat_results = split_by_feat_pattern(content_html_str, cleaned_node_name, full_path_str, source_file_decoded or "")
+                    if feat_results:
+                        results.extend(feat_results)
+                    else:
+                        # 如果专长切分失败，回退到普通处理
+                        logging.warning(f"  -> 专长切分失败，回退到普通处理")
+                        content_type = None  # 重置以便继续普通处理
+                
+                # 如果已经通过法术/专长模式处理完成，跳过普通处理
+                if content_type in ('spell', 'feat'):
+                    pass  # 已处理完成，不需要额外操作
+                
                 # --- 情况A: 不分割 (split_by: null) ---
-                if not split_by:
+                elif not split_by:
                     logging.debug(f"  -> 作为单个文档处理 (No Split)")
                     page_content_md = convert_html_to_mixed_format(content_html_str)
 
@@ -317,7 +575,7 @@ def process_node(
                                     if chunk_0_md:
                                         chunk_0_title = f"{cleaned_node_name} (概述)"
                                         chunk_0_full_path = f"{full_path_str}/{chunk_0_title}"
-                                        entry = create_data_entry(chunk_0_md, chunk_0_full_path, chunk_0_title, f"{source_file}#overview")
+                                        entry = create_data_entry(chunk_0_md, chunk_0_full_path, chunk_0_title, f"{source_file_decoded}#overview")
                                         results.append(entry)
                                     
                                     # 处理各个章节
@@ -338,7 +596,7 @@ def process_node(
                                                 chunk_title = title_tag.get_text(strip=True) if title_tag else f"Section {i // 2 + 1}"
                                             
                                             chunk_full_path = f"{full_path_str}/{chunk_title}"
-                                            entry = create_data_entry(chunk_md, chunk_full_path, chunk_title, f"{source_file}#{chunk_title.replace(' ', '_')}")
+                                            entry = create_data_entry(chunk_md, chunk_full_path, chunk_title, f"{source_file_decoded}#{chunk_title.replace(' ', '_')}")
                                             results.append(entry)
                                     
                                     auto_split_success = True
@@ -362,12 +620,12 @@ def process_node(
                                         chunk_content, 
                                         chunk_full_path, 
                                         chunk_title, 
-                                        f"{source_file}#part{chunk_idx + 1}"
+                                        f"{source_file_decoded}#part{chunk_idx + 1}"
                                     )
                                     results.append(entry)
                         else:
                             # 文档大小正常，直接添加
-                            entry = create_data_entry(page_content_md, full_path_str, cleaned_node_name, source_file)
+                            entry = create_data_entry(page_content_md, full_path_str, cleaned_node_name, source_file_decoded)
                             results.append(entry)
                     else:
                         logging.warning(f"  -> 内容为空 (Selector: {selector})")
@@ -399,7 +657,7 @@ def process_node(
                                 page_content_md,
                                 full_path_str,
                                 cleaned_node_name,  # <-- V5 change
-                                source_file
+                                source_file_decoded
                             )
                             results.append(entry)
 
@@ -413,7 +671,7 @@ def process_node(
                             # 为这个 "概述" 块创建条目
                             chunk_0_title = f"{cleaned_node_name} (概述)"  # <-- V5 change
                             chunk_0_full_path = f"{full_path_str}/{chunk_0_title}"
-                            chunk_0_source_file = f"{source_file}#overview"
+                            chunk_0_source_file = f"{source_file_decoded}#overview"
 
                             entry = create_data_entry(
                                 chunk_0_md,
@@ -455,7 +713,7 @@ def process_node(
                             if chunk_md:
                                 chunk_full_path = f"{full_path_str}/{chunk_title}"
                                 chunk_source_title = chunk_title
-                                chunk_source_file = f"{source_file}#{chunk_title.replace(' ', '_')}"
+                                chunk_source_file = f"{source_file_decoded}#{chunk_title.replace(' ', '_')}"
 
                                 entry = create_data_entry(
                                     chunk_md,
