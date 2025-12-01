@@ -1,10 +1,18 @@
 """
 模块: Agent (src/agent_gemini.py)
 针对 Gemini 1.5 Flash 超大上下文窗口优化的简化 Agent
+支持 PF (Pathfinder) 和 DND (Dungeons & Dragons) 两种规则版本
+
+注意：路径加权逻辑已移至 parent_retriever.py 中的 PathBoostedRetriever
+在搜索阶段直接应用加权，而不是后处理
+
+混合检索策略（关键词优先 + 语义补充）在本模块内实现
 """
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple, Set
+from collections import defaultdict
 import re
+import math
 import numpy as np
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
@@ -13,9 +21,14 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from config import config
+from config.settings import get_current_version, get_version_info
 
-# Agent 提示词模板
-GEMINI_AGENT_TEMPLATE = """你是一个专业的 DND 规则专家助手。
+# ============================================
+# 版本特定的 Prompt 模板
+# ============================================
+
+# Pathfinder 规则专用 Prompt
+PF_AGENT_TEMPLATE = """你是一个专业的 Pathfinder 规则专家助手。
 
 你的任务是基于提供的规则文档，准确、详细地回答用户的问题。
 
@@ -38,7 +51,45 @@ GEMINI_AGENT_TEMPLATE = """你是一个专业的 DND 规则专家助手。
 ## 你的回答：
 """
 
-GEMINI_PROMPT = ChatPromptTemplate.from_template(GEMINI_AGENT_TEMPLATE)
+# DND 规则专用 Prompt
+DND_AGENT_TEMPLATE = """你是一个专业的 DND 规则专家助手。
+
+你的任务是基于提供的规则文档，准确、详细地回答用户的问题。
+
+## 重要指引：
+1. **引用来源**：在回答中明确指出信息来源（使用文档的 full_path）
+2. **保持准确**：严格基于提供的规则文档，不要编造信息
+3. **结构感知**：注意文档的层级关系（通过 full_path 判断）
+4. **表格理解**：文档中可能包含 HTML 表格，请正确解析
+5. **完整回答**：如果问题涉及多个方面，请综合所有相关文档
+6. **未找到时**：如果文档中没有相关信息，请明确告知
+
+## 检索到的规则文档：
+
+{context}
+
+## 用户问题：
+
+{input}
+
+## 你的回答：
+"""
+
+# 根据版本选择 Prompt
+def get_agent_template() -> str:
+    """根据当前版本获取对应的 Prompt 模板"""
+    version = get_current_version()
+    if version == "dnd":
+        return DND_AGENT_TEMPLATE
+    else:
+        return PF_AGENT_TEMPLATE
+
+def get_agent_prompt() -> ChatPromptTemplate:
+    """获取当前版本的 ChatPromptTemplate"""
+    return ChatPromptTemplate.from_template(get_agent_template())
+
+# 默认使用动态获取的 Prompt
+GEMINI_PROMPT = get_agent_prompt()
 
 
 class GeminiAgentExecutor:
@@ -59,32 +110,295 @@ class GeminiAgentExecutor:
         
         # 创建 chain
         self.chain = GEMINI_PROMPT | self.llm | StrOutputParser()
+        
+        # ============================================
+        # 关键词检索索引（延迟构建）
+        # ============================================
+        self._keyword_index: Dict[str, List[Tuple[str, float]]] = {}  # {term: [(doc_id, score), ...]}
+        self._doc_term_matrix: Dict[str, Dict[str, float]] = {}  # {doc_id: {term: score}}
+        self._idf_scores: Dict[str, float] = {}  # {term: idf_score}
+        self._doc_cache: Dict[str, Document] = {}  # {doc_id: Document}
+        self._keyword_index_built: bool = False
+
+    # ============================================
+    # 关键词检索相关方法
+    # ============================================
+    
+    def _tokenize(self, text: str) -> List[str]:
+        """
+        简单分词：中文 n-gram + 英文单词
+        
+        Args:
+            text: 待分词文本
+            
+        Returns:
+            分词结果列表
+        """
+        tokens = []
+        
+        # 提取英文单词和数字（转小写）
+        english_pattern = r'[a-zA-Z0-9]+'
+        english_tokens = re.findall(english_pattern, text.lower())
+        tokens.extend(english_tokens)
+        
+        # 提取中文词组
+        chinese_pattern = r'[\u4e00-\u9fff]+'
+        chinese_segments = re.findall(chinese_pattern, text)
+        
+        for segment in chinese_segments:
+            # 添加完整词（2-10字）
+            if 2 <= len(segment) <= 10:
+                tokens.append(segment)
+            # 添加 2-gram 到 4-gram
+            for n in range(2, min(5, len(segment) + 1)):
+                for i in range(len(segment) - n + 1):
+                    tokens.append(segment[i:i+n])
+        
+        return tokens
+    
+    def _build_keyword_index(self, docs: List[Document]):
+        """
+        为文档列表构建关键词索引
+        
+        Args:
+            docs: 文档列表
+        """
+        if self._keyword_index_built and len(self._doc_cache) >= len(docs):
+            return
+        
+        print(f"[Agent] 正在构建关键词索引 ({len(docs)} 个文档)...")
+        
+        # 清空旧索引
+        self._keyword_index.clear()
+        self._doc_term_matrix.clear()
+        self._idf_scores.clear()
+        self._doc_cache.clear()
+        
+        # 计算词频
+        doc_term_freq: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        doc_lengths: Dict[str, int] = {}
+        term_doc_count: Dict[str, int] = defaultdict(int)
+        
+        for doc in docs:
+            # 生成文档 ID
+            doc_id = f"{doc.metadata.get('full_path', 'unknown')}::{hash(doc.page_content[:200])}"
+            self._doc_cache[doc_id] = doc
+            
+            # 获取文档内容
+            content = doc.page_content
+            title = doc.metadata.get('source_title', '')
+            full_path = doc.metadata.get('full_path', '')
+            
+            # 标题加权（出现3次）
+            full_text = f"{title} {title} {title} {full_path} {content}"
+            tokens = self._tokenize(full_text)
+            
+            doc_lengths[doc_id] = len(tokens)
+            seen_terms: Set[str] = set()
+            
+            for token in tokens:
+                doc_term_freq[doc_id][token] += 1
+                if token not in seen_terms:
+                    term_doc_count[token] += 1
+                    seen_terms.add(token)
+        
+        # 计算 IDF
+        total_docs = len(docs)
+        for term, doc_count in term_doc_count.items():
+            self._idf_scores[term] = math.log((total_docs + 1) / (doc_count + 1)) + 1
+        
+        # 计算 TF-IDF 并构建倒排索引
+        avg_doc_length = sum(doc_lengths.values()) / len(doc_lengths) if doc_lengths else 1
+        
+        for doc_id, term_freq in doc_term_freq.items():
+            doc_len = doc_lengths[doc_id]
+            self._doc_term_matrix[doc_id] = {}
+            
+            for term, freq in term_freq.items():
+                # BM25 风格的 TF 归一化
+                k1, b = 1.5, 0.75
+                tf_norm = (freq * (k1 + 1)) / (freq + k1 * (1 - b + b * doc_len / avg_doc_length))
+                
+                # TF-IDF 分数
+                tf_idf = tf_norm * self._idf_scores[term]
+                self._doc_term_matrix[doc_id][term] = tf_idf
+                
+                # 更新倒排索引
+                if term not in self._keyword_index:
+                    self._keyword_index[term] = []
+                self._keyword_index[term].append((doc_id, tf_idf))
+        
+        # 对倒排索引中的文档按分数排序
+        for term in self._keyword_index:
+            self._keyword_index[term].sort(key=lambda x: x[1], reverse=True)
+        
+        self._keyword_index_built = True
+        print(f"[Agent] 关键词索引构建完成: {len(self._keyword_index)} 个词项")
+    
+    def _keyword_search(self, query: str, docs: List[Document]) -> List[Tuple[Document, float, int]]:
+        """
+        对文档进行关键词检索排序
+        
+        Args:
+            query: 用户查询
+            docs: 待排序的文档列表
+            
+        Returns:
+            [(Document, keyword_score, match_count), ...] 按分数降序
+        """
+        # 构建索引
+        self._build_keyword_index(docs)
+        
+        # 分词查询
+        query_tokens = list(set(self._tokenize(query)))  # 去重
+        
+        # 计算每个文档的匹配分数
+        doc_scores: Dict[str, float] = defaultdict(float)
+        doc_match_count: Dict[str, int] = defaultdict(int)
+        
+        for token in query_tokens:
+            if token in self._keyword_index:
+                for doc_id, score in self._keyword_index[token]:
+                    doc_scores[doc_id] += score
+                    doc_match_count[doc_id] += 1
+        
+        # 计算最终分数并排序
+        results = []
+        for doc_id, base_score in doc_scores.items():
+            if doc_id in self._doc_cache:
+                # 匹配词数奖励
+                match_bonus = 1 + 0.3 * (doc_match_count[doc_id] - 1)
+                final_score = base_score * match_bonus
+                results.append((self._doc_cache[doc_id], final_score, doc_match_count[doc_id]))
+        
+        # 按分数排序
+        results.sort(key=lambda x: x[1], reverse=True)
+        
+        return results
+    
+    def _hybrid_rerank(
+        self, 
+        query: str, 
+        docs: List[Document],
+        keyword_boost: float = 0.5,
+        keyword_min_score: float = 0.1
+    ) -> List[Document]:
+        """
+        混合重排序：关键词优先 + 语义排序
+        
+        策略：
+        1. 对检索结果进行关键词匹配打分
+        2. 关键词匹配的文档获得固定加分（只加一次，不累加）
+        3. 没有关键词匹配的文档保持原语义排序
+        
+        Args:
+            query: 用户查询
+            docs: 语义检索返回的文档列表（已按语义相似度排序）
+            keyword_boost: 关键词匹配的固定加分值（只加一次）
+            keyword_min_score: 关键词匹配的最低分数阈值（归一化后）
+            
+        Returns:
+            重排序后的文档列表
+        """
+        if not docs:
+            return docs
+        
+        print(f"\n[Agent] 执行混合重排序（关键词优先）...")
+        print(f"[Agent] 参数: keyword_boost={keyword_boost}, min_score={keyword_min_score}")
+        
+        # 1. 关键词检索打分
+        keyword_results = self._keyword_search(query, docs)
+        
+        # 归一化关键词分数到 0-1
+        if keyword_results:
+            max_score = max(score for _, score, _ in keyword_results)
+            min_score = min(score for _, score, _ in keyword_results)
+            score_range = max_score - min_score if max_score > min_score else 1
+            
+            keyword_scores = {}
+            for doc, score, match_count in keyword_results:
+                doc_id = id(doc)
+                norm_score = (score - min_score) / score_range
+                keyword_scores[doc_id] = (norm_score, match_count)
+        else:
+            keyword_scores = {}
+        
+        # 2. 结合语义排序和关键词打分
+        # 原始语义排序的位置分数（越靠前分数越高）
+        results = []
+        keyword_matched_count = 0
+        
+        for rank, doc in enumerate(docs):
+            doc_id = id(doc)
+            
+            # 语义排序的位置分数（归一化到 0-1）
+            semantic_position_score = 1.0 - (rank / len(docs))
+            
+            # 关键词匹配分数
+            if doc_id in keyword_scores:
+                kw_score, match_count = keyword_scores[doc_id]
+                
+                if kw_score >= keyword_min_score:
+                    # 关键词匹配：固定加分（只加一次，不管匹配几个关键词）
+                    final_score = semantic_position_score + keyword_boost
+                    source = f"keyword({match_count}词)"
+                    keyword_matched_count += 1
+                    is_boosted = True
+                else:
+                    final_score = semantic_position_score
+                    source = "semantic"
+                    is_boosted = False
+            else:
+                final_score = semantic_position_score
+                source = "semantic"
+                is_boosted = False
+            
+            results.append((doc, final_score, source, is_boosted, rank))
+        
+        # 3. 按最终分数排序
+        results.sort(key=lambda x: x[1], reverse=True)
+        
+        # 4. 显示所有文档的重排序结果
+        print(f"\n[Agent] 混合重排序结果（关键词匹配: {keyword_matched_count}/{len(docs)} 个文档）：")
+        print(f"{'排名':>4} | {'原排名':>6} | {'来源':^15} | {'分数':>6} | {'标题'}")
+        print("-" * 80)
+        
+        for new_rank, (doc, score, source, is_boosted, old_rank) in enumerate(results, 1):
+            title = doc.metadata.get('source_title', '未知')[:40]
+            icon = "🔑" if is_boosted else "🧠"
+            rank_change = old_rank + 1 - new_rank
+            
+            if rank_change > 0:
+                change_str = f"↑{rank_change}"
+            elif rank_change < 0:
+                change_str = f"↓{-rank_change}"
+            else:
+                change_str = "="
+            
+            print(f"{new_rank:>4} | {old_rank+1:>4}{change_str:>2} | {icon} {source:<12} | {score:.3f} | {title}")
+        
+        # 返回排序后的文档
+        reranked_docs = [doc for doc, _, _, _, _ in results]
+        print(f"\n[Agent] 混合重排序完成")
+        
+        return reranked_docs
 
     def _calculate_semantic_similarity(self, query: str, doc: Document) -> float:
         """
         使用 embedding 模型计算查询与文档的语义相似度
-        支持基于路径的相似度加权（正向加权和负向降权）
+        
+        注意：路径加权已移至 PathBoostedRetriever，在搜索阶段直接应用
+        此方法现在仅用于文档去重时的相似度计算
         
         Args:
             query: 用户查询
             doc: 文档
             
         Returns:
-            相似度分数 (0-1)，可能经过路径加权调整
-            如果文档被排除，返回 -1.0
+            相似度分数 (0-1)
         """
         if not self.embedding_model:
             return 1.0  # 如果没有 embedding 模型，默认全部通过
-        
-        full_path = doc.metadata.get('full_path', '')
-        
-        # 🆕 路径排除：如果启用且文档路径匹配排除规则，直接返回 -1
-        if getattr(config, 'ENABLE_PATH_EXCLUSION', False):
-            exclusion_rules = getattr(config, 'PATH_EXCLUSION_RULES', [])
-            for exclusion_keyword in exclusion_rules:
-                if exclusion_keyword in full_path:
-                    # print(f"[Agent] 路径排除: {full_path} 匹配 '{exclusion_keyword}'，跳过")
-                    return -1.0  # 标记为排除
         
         try:
             # 获取查询和文档的 embedding
@@ -98,30 +412,8 @@ class GeminiAgentExecutor:
             doc_vec = np.array(doc_embedding)
             
             similarity = np.dot(query_vec, doc_vec) / (np.linalg.norm(query_vec) * np.linalg.norm(doc_vec))
-            base_similarity = float(similarity)
+            return float(similarity)
             
-            # 🆕 路径加权：支持正向加权（提升）和负向加权（降低）
-            if getattr(config, 'ENABLE_PATH_BOOSTING', False):
-                boost_rules = getattr(config, 'PATH_BOOST_RULES', {})
-                
-                for path_keyword, boost_value in boost_rules.items():
-                    if path_keyword in full_path:
-                        # 应用加权（正值提升，负值降低）
-                        boosted_similarity = base_similarity + boost_value
-                        # 确保相似度在 [0, 1] 范围内
-                        boosted_similarity = max(0.0, min(1.0, boosted_similarity))
-                        
-                        # 调试信息（可选）
-                        if boost_value >= 0:
-                            # print(f"[Agent] 路径加权↑: {full_path[:50]}... 匹配 '{path_keyword}', {base_similarity:.3f} → {boosted_similarity:.3f} (+{boost_value})")
-                            pass
-                        else:
-                            # print(f"[Agent] 路径降权↓: {full_path[:50]}... 匹配 '{path_keyword}', {base_similarity:.3f} → {boosted_similarity:.3f} ({boost_value})")
-                            pass
-                        
-                        return boosted_similarity
-            
-            return base_similarity
         except Exception as e:
             print(f"[Agent] 计算相似度时出错: {e}")
             return 1.0  # 出错时默认通过
@@ -353,11 +645,13 @@ class GeminiAgentExecutor:
     def _filter_docs_by_similarity(self, query: str, docs: List[Document], threshold: float = 0.5, mode: str = "rank") -> List[Document]:
         """
         基于语义相似度过滤或排序文档
-        同时处理路径排除规则
+        
+        ⚠️ 警告：此方法会重新计算原始语义相似度，会覆盖 PathBoostedRetriever 的路径加权！
+        如果使用 PathBoostedRetriever，建议禁用此功能 (ENABLE_SEMANTIC_FILTER = False)
         
         Args:
             query: 用户查询
-            docs: 检索到的文档列表
+            docs: 检索到的文档列表（已经过路径加权排序）
             threshold: 相似度阈值 (0-1)，仅在 mode="threshold" 时使用
             mode: "rank" (按相似度排序) 或 "threshold" (过滤低于阈值的文档)
             
@@ -378,24 +672,14 @@ class GeminiAgentExecutor:
         
         # 计算所有文档与查询的相似度
         doc_scores = []
-        excluded_count = 0
         
         for i, doc in enumerate(docs):
             similarity = self._calculate_semantic_similarity(query, doc)
-            
-            # 相似度为 -1 表示被排除
-            if similarity < 0:
-                excluded_count += 1
-                continue
-            
             doc_scores.append({
                 'doc': doc,
                 'similarity': similarity,
                 'index': i
             })
-        
-        if excluded_count > 0:
-            print(f"[Agent] 路径排除: 已过滤 {excluded_count} 个不符合条件的文档")
         
         if mode == "rank":
             # 按相似度降序排序
@@ -408,25 +692,18 @@ class GeminiAgentExecutor:
                 full_path = item['doc'].metadata.get('full_path', '未知')
                 category = full_path.split('/')[0] if '/' in full_path else '未知'
                 
-                # 标注版本信息
-                version_tag = ""
-                if "2024" in full_path or "2025" in full_path:
-                    version_tag = " 🆕"
-                elif any(old in full_path for old in ["玩家手册/", "城主指南/", "怪物图鉴/"]):
-                    version_tag = " 📜"
-                
-                print(f"  {rank}. [{category}]{version_tag} {title[:35]}... 相似度={item['similarity']:.3f}")
+                print(f"  {rank}. [{category}] {title[:]}... 相似度={item['similarity']:.3f}")
             
             # 返回排序后的文档
             filtered_docs = [item['doc'] for item in doc_scores]
-            print(f"\n[Agent] 语义排序完成: {len(docs)} 个文档 → {len(filtered_docs)} 个文档（已排除 {excluded_count} 个）")
+            print(f"\n[Agent] 语义排序完成: {len(docs)} 个文档 → {len(filtered_docs)} 个文档")
             
         else:  # mode == "threshold"
             # 按阈值过滤
             filtered_docs = []
             for item in doc_scores:
                 title = item['doc'].metadata.get('source_title', '未知')
-                print(f"  文档 {item['index']+1}: {title[:30]}... 相似度={item['similarity']:.3f}", end="")
+                print(f"  文档 {item['index']+1}: {title[:]}... 相似度={item['similarity']:.3f}", end="")
                 
                 if item['similarity'] >= threshold:
                     filtered_docs.append(item['doc'])
@@ -434,7 +711,7 @@ class GeminiAgentExecutor:
                 else:
                     print(" ✗ 过滤")
             
-            print(f"[Agent] 语义过滤: {len(docs)} 个文档 → {len(filtered_docs)} 个文档（已排除 {excluded_count} 个）")
+            print(f"[Agent] 语义过滤: {len(docs)} 个文档 → {len(filtered_docs)} 个文档")
         
         return filtered_docs
     
@@ -482,11 +759,28 @@ class GeminiAgentExecutor:
             retrieved_docs = self.retriever.invoke(user_input)
             print(f"[Agent] 检索到 {len(retrieved_docs)} 个候选文档")
             
-            # 2. 语义相似度排序/过滤：使用 embedding 自动判断文档相关性（可配置）
-            if hasattr(config, 'ENABLE_SEMANTIC_FILTER') and config.ENABLE_SEMANTIC_FILTER:
+            # 2. 混合重排序：关键词优先 + 语义排序（可配置）
+            # 这会对语义检索的结果进行二次排序，让精确匹配关键词的文档排在前面
+            if getattr(config, 'ENABLE_HYBRID_RETRIEVAL', False):
+                keyword_boost = getattr(config, 'KEYWORD_MATCH_BOOST', 0.5)
+                keyword_min_score = getattr(config, 'KEYWORD_MIN_SCORE_THRESHOLD', 0.1)
+                
+                retrieved_docs = self._hybrid_rerank(
+                    user_input,
+                    retrieved_docs,
+                    keyword_boost=keyword_boost,
+                    keyword_min_score=keyword_min_score
+                )
+            
+            # 3. 语义相似度排序/过滤（可配置）
+            # ⚠️ 注意：PathBoostedRetriever 已经在检索阶段完成了路径加权排序
+            # 如果启用此选项，会重新计算原始相似度，覆盖掉路径加权的效果！
+            # 建议：如果使用 PathBoostedRetriever，应禁用此选项 (ENABLE_SEMANTIC_FILTER = False)
+            elif hasattr(config, 'ENABLE_SEMANTIC_FILTER') and config.ENABLE_SEMANTIC_FILTER:
                 filter_mode = getattr(config, 'SEMANTIC_FILTER_MODE', 'rank')
                 similarity_threshold = getattr(config, 'SEMANTIC_SIMILARITY_THRESHOLD', 0.4)
                 
+                print(f"[Agent] ⚠️  警告：启用语义重排序会覆盖 PathBoostedRetriever 的路径加权！")
                 retrieved_docs = self._filter_docs_by_similarity(
                     user_input, 
                     retrieved_docs, 
@@ -494,9 +788,9 @@ class GeminiAgentExecutor:
                     mode=filter_mode
                 )
             else:
-                print(f"[Agent] 语义过滤已禁用，跳过过滤")
+                print(f"[Agent] 重排序已禁用（保留检索器的原始排序）")
             
-            # 3. 文档去重并补充：移除内容相似的重复文档，并动态补充（可配置）
+            # 4. 文档去重并补充：移除内容相似的重复文档，并动态补充（可配置）
             if hasattr(config, 'ENABLE_DOCUMENT_DEDUPLICATION') and config.ENABLE_DOCUMENT_DEDUPLICATION:
                 dedup_threshold = getattr(config, 'DOCUMENT_SIMILARITY_THRESHOLD', 0.80)
                 target_doc_count = getattr(config, 'PARENT_RETRIEVER_TOP_K', 30)

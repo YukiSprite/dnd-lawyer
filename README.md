@@ -5,6 +5,36 @@
 
 ---
 
+## 🎮 版本切换
+
+本项目支持两种规则版本：**Pathfinder (PF)** 和 **Dungeons & Dragons (DND)**
+
+### 切换方法
+
+编辑 `config/settings.py` 文件，修改 `CURRENT_VERSION` 变量：
+
+```python
+# 使用 Pathfinder 规则
+CURRENT_VERSION = "pf"
+
+# 使用 DND 规则  
+CURRENT_VERSION = "dnd"
+```
+
+### 版本差异
+
+| 功能 | 说明 |
+|------|------|
+| 配置文件 | `config/config.py` - 统一配置，内部根据版本动态选择参数 |
+| Agent 模块 | `src/agent_gemini.py` - 统一 Agent，内部根据版本动态选择 Prompt |
+| 数据处理 | `tools/package_json.py` - 统一处理，PF 版本启用法术/专长特殊切分 |
+
+**版本特定功能**：
+- **PF 版本**：启用法术/专长自动识别和特殊切分功能
+- **DND 版本**：使用路径加权规则优先显示 2024/2025 版本规则
+
+---
+
 ## 目录
 
 - [快速开始](#-快速开始)
@@ -371,7 +401,6 @@ PATH_BOOST_RULES = {
   玩家手册/法师 (0.85-0.15=0.70) 📜 → 排名第2
 ```
 
-📖 **详细文档**：[docs/version_priority.md](docs/version_priority.md)
 
 #### 2. 路径加权与排除
 
@@ -379,7 +408,6 @@ PATH_BOOST_RULES = {
 
 **说明**：Credits 路径包含官方说明、鸣谢、规则总览等重要内容。
 
-📖 **详细文档**：[docs/path_boosting.md](docs/path_boosting.md)
 
 #### 3. 启用语义相似度过滤
 
@@ -550,17 +578,18 @@ dnd-lawyer/
 │
 ├── config/                         # ⚙️ 配置目录
 │   ├── api_config.py               #   🔑 API 配置（重要！）
-│   └── config.py                   #   📋 项目参数配置
+│   ├── config.py                   #   📋 项目参数配置（统一，根据版本动态选择）
+│   └── settings.py                 #   🎮 规则版本配置（PF/DND 切换）
 │
 ├── src/                            # 🧠 核心源代码
 │   ├── llm_gemini.py               #   💬 Gemini LLM 初始化
-│   ├── agent_gemini.py             #   🤖 Agent 逻辑（问答协调）
+│   ├── agent_gemini.py             #   🤖 Agent 逻辑（统一，根据版本选择 Prompt）
 │   ├── parent_retriever.py         #   🔍 父文档检索器
 │   └── data_loader.py              #   📖 数据加载与分割
 │
 ├── tools/                          # 🛠️ 工具脚本
 │   ├── console_gemini.py           #   💻 交互控制台
-│   ├── package_json.py             #   📝 数据生成工具
+│   ├── package_json.py             #   📝 数据生成工具（统一，PF 版本启用特殊切分）
 │   ├── analyze_chm.py              #   🔬 CHM 结构分析
 │   └── check_system.py             #   ✅ 系统检查工具
 │
@@ -633,11 +662,15 @@ JSON 数据 (data/rules_data.json)
 ## 📝 更新日志
 
 ### v1.0.20251127
-- ✅ 支持调用API（替代 Ollama）
-- ✅ 支持 Google 官方和 OpenAI 兼容双模式
-- ✅ 实现语义相似度过滤功能
-- ✅ 优化父文档检索策略
-
+- ☑️ 支持调用API（替代 Ollama）
+- ☑️ 支持 Google 官方和 OpenAI 兼容双模式
+- ☑️ 实现语义相似度过滤功能
+- ☑️ 优化父文档检索策略
+### v1.0.20251128
+- ☑️ 支持了pf规则
+### v1.1.20251202
+- ☑️ 将dnd规则查询与pf规则查询整合到了一起
+- ☑️ 优化了pf不全书的拆分逻辑，使能查询到之前查询不到的调查员天赋等内容
 ---
 
 ## 🤝 贡献

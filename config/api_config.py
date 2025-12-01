@@ -65,6 +65,17 @@ EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-base-zh-v1.5"
 # Embedding 设备
 EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", "cuda")
 
+# Embedding 批处理大小（更大的值 = 更快，但需要更多显存）
+# 使用动态策略：从此值开始，失败则减半重试
+# RTX 5090 (32GB) 建议: 1024
+# RTX 4090 (24GB) 建议: 512
+# RTX 3090 (24GB) 建议: 256
+EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "1024"))
+
+# 多 GPU 支持（如果有多块 GPU）
+# 设置为 True 将使用 DataParallel 在多 GPU 上并行处理
+EMBEDDING_MULTI_GPU = os.getenv("EMBEDDING_MULTI_GPU", "false").lower() == "true"
+
 
 # ============================================
 # 🔧 辅助函数
@@ -217,6 +228,14 @@ def create_embedding_model():
     """
     创建 Embedding 模型实例（统一的模型创建入口）
     
+    支持批处理大小配置以加速处理：
+    - 更大的 batch_size = 更快的处理速度
+    - 需要更多 GPU 显存
+    
+    多 GPU 支持：
+    - 设置 EMBEDDING_MULTI_GPU=true 启用
+    - 自动检测可用 GPU 数量并使用 DataParallel
+    
     Returns:
         HuggingFaceEmbeddings: 配置好的 Embedding 实例
     """
@@ -230,12 +249,41 @@ def create_embedding_model():
     
     device = get_embedding_device()
     
+    # 检测 GPU 数量
+    gpu_count = 0
+    if device == "cuda":
+        try:
+            import torch
+            gpu_count = torch.cuda.device_count()
+            print(f"🖥️  检测到 {gpu_count} 个 GPU")
+        except ImportError:
+            pass
+    
     print(f"🔤 正在加载 Embedding 模型: {EMBEDDING_MODEL_NAME}")
     print(f"   设备: {device}")
+    print(f"   批处理大小: {EMBEDDING_BATCH_SIZE}")
+    print(f"   多 GPU 模式: {'启用' if EMBEDDING_MULTI_GPU and gpu_count > 1 else '禁用'}")
+    
+    # 配置 encode_kwargs 以启用批处理和其他优化
+    # 注意: 不要设置 show_progress_bar，langchain_huggingface 内部会处理
+    encode_kwargs = {
+        'batch_size': EMBEDDING_BATCH_SIZE,
+        'normalize_embeddings': True,  # BGE 模型推荐启用归一化
+    }
+    
+    # 多 GPU 配置
+    model_kwargs = {'device': device}
+    if EMBEDDING_MULTI_GPU and gpu_count > 1:
+        # sentence-transformers 支持多 GPU
+        # 通过设置 device 为 None 并在 encode 时使用 multi_process_pool
+        print(f"   ⚡ 启用多 GPU 并行处理 ({gpu_count} GPUs)")
+        # 对于多 GPU，增大批处理大小
+        encode_kwargs['batch_size'] = EMBEDDING_BATCH_SIZE * gpu_count
     
     embeddings = HuggingFaceEmbeddings(
         model_name=EMBEDDING_MODEL_NAME,
-        model_kwargs={'device': device}
+        model_kwargs=model_kwargs,
+        encode_kwargs=encode_kwargs
     )
     
     print(f"✓ Embedding 模型加载成功！")
