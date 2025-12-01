@@ -658,7 +658,7 @@ JSON 数据 (data/rules_data.json)
 ---
 
 ## To Do List
-[] 支持更多规则
+[☑️] 支持更多规则——现已支持pf1e规则，见本项目pathfinder分支
 ## 📝 更新日志
 
 ### v1.0.20251127
