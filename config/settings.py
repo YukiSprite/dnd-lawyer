@@ -13,7 +13,7 @@
 
 # 当前使用的规则版本
 # 可选值: "pf" (Pathfinder) 或 "dnd" (Dungeons & Dragons)
-CURRENT_VERSION = "pf"
+CURRENT_VERSION = "dnd"
 
 # ============================================
 # 版本信息
