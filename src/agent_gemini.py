@@ -23,6 +23,8 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from config import config
 from config.settings import get_current_version, get_version_info
 
+import datetime
+
 # ============================================
 # 版本特定的 Prompt 模板
 # ============================================
@@ -847,8 +849,14 @@ class GeminiAgentExecutor:
             if len(self.chat_history) > self.history_k:
                 self.chat_history = self.chat_history[-self.history_k:]
             
-            print("[Agent] 回答生成完成")
-            
+            print("[Agent] 回答生成完成，正在写入日志")
+            currDate = datetime.datetime.now()
+            currDate = currDate.strftime("%Y-%m-%d")
+            chatLogPath = "./logs/chat_history_" + currDate + ".md"
+            with open(chatLogPath, "a", encoding="utf-8") as f:
+                f.write(f"## 用户输入:\n{user_input}\n\n")
+                f.write(f"## AI 回答:\n{response_with_sources}\n\n")
+                f.write(f"---\n\n")
             return {"output": response_with_sources}
             
         except Exception as e:

@@ -1,10 +1,13 @@
 # DND汴京小助手 🎲
 
-基于 Google Gemini 的 DND 5E 规则问答系统，支持官方 API 和 OpenAI 兼容代理服务。
-还在为某个行为是否符合规则发愁吗？还在为不是律政先锋而苦恼吗？试试这款汴京小助手，帮你在面对群友超强超劲的疑似灰色构筑与脑洞大开的神奇操作时能有理有据地进行讨论
-已在纯美苹果园的dnd5e区与pf区发布讨论帖，也欢迎在果园进行讨论。
-pf区：https://www.goddessfantasy.net/bbs/index.php?topic=163982.0
-5e区：https://www.goddessfantasy.net/bbs/index.php?topic=163953.0
+> 基于 Google Gemini 的 DND 5E 规则问答系统，支持官方 API 和 OpenAI 兼容代理服务。
+
+还在为某个行为是否符合规则发愁吗？还在为不是律政先锋而苦恼吗？试试这款汴京小助手，帮你在面对群友超强超劲的疑似灰色构筑与脑洞大开的神奇操作时能有理有据地进行讨论。
+
+已在纯美苹果园的 DND 5E 区与 PF 区发布讨论帖，也欢迎在果园进行讨论：
+- **PF区**：https://www.goddessfantasy.net/bbs/index.php?topic=163982.0
+- **5E区**：https://www.goddessfantasy.net/bbs/index.php?topic=163953.0
+
 ---
 
 ## 🎮 版本切换
@@ -100,11 +103,26 @@ bash noDownload.sh
 python run.py
 ```
 
+启动后访问 `http://localhost:6008` 即可使用 Web 界面！
+
+**其他启动方式**：
+```bash
+python run.py              # 默认启动 Web UI（端口 6008）
+python run.py web 8080     # 启动 Web UI（指定端口）
+python run.py console      # 启动命令行控制台
+```
+
 等待加载完成后，即可开始提问！
 
 ---
 
 ## ✨ 核心特性
+
+### 🖥️ 图形化 Web 界面
+- ✅ **现代化 UI** - 基于 Streamlit 的美观聊天界面
+- ✅ **对话历史** - 支持查看和回顾历史对话记录
+- ✅ **示例问题** - 侧边栏提供常见问题快速入口
+- ✅ **来源追溯** - 每个回答都显示参考的规则文档来源
 
 ### 🌐 灵活的 API 支持
 - ✅ **Google 官方 API** - 直接使用 Google AI Studio 的 API（需科学上网）
@@ -253,14 +271,42 @@ pip install -r requirements.txt
 
 ## 📖 使用指南
 
-### 启动应用
+### 启动方式
 
+| 命令 | 说明 |
+|------|------|
+| `python run.py` | **默认启动 Web UI**（端口 6008） |
+| `python run.py web` | 启动 Web UI |
+| `python run.py web 8080` | 启动 Web UI（指定端口） |
+| `python run.py console` | 启动命令行控制台 |
+| `python run.py help` | 显示帮助信息 |
+
+### Web UI 界面
+
+启动后访问 `http://localhost:6008`（或你指定的端口），即可看到图形化界面：
+
+**功能特点**：
+- 🎯 **智能问答**：在输入框输入规则问题，AI 会检索相关文档并生成回答
+- 📚 **来源追溯**：每个回答都会显示参考的规则文档来源
+- 💡 **示例问题**：侧边栏提供常见问题，点击即可快速提问
+- 📜 **历史记录**：支持按日期查看历史对话记录
+- 🗑️ **清空对话**：一键清空当前会话的对话历史
+
+### 命令行控制台
+
+如果更喜欢命令行界面，可以使用：
 ```bash
-python run.py
+python run.py console
 ```
 
 ### 示例对话
 
+#### Web UI 界面示例
+
+<!-- 将截图保存到 docs/images/ 目录，然后取消下面的注释 -->
+![Web UI 界面](docs/images/webuiExample.png)
+
+#### 命令行界面示例
 ```
 请输入问题 >> 圣武士能否使用带有投掷词条的近战武器，投掷攻击敌人触发至圣斩？
 
@@ -572,11 +618,15 @@ python run.py
 
 ```
 dnd-lawyer/
-├── run.py                          # ⭐ 主启动脚本
+├── run.py                          # ⭐ 主启动脚本（默认启动 Web UI）
 ├── init.sh                         # 🚀 一键初始化脚本（含下载）
 ├── noDownload.sh                   # 🔧 初始化脚本（不下载不全书）
 ├── clear.sh                        # 🗑️  清理脚本
 ├── requirements.txt                # 📦 Python 依赖
+│
+├── webui/                          # 🖥️ Web 图形界面
+│   ├── app.py                      #   📱 Streamlit 主程序
+│   └── run.sh                      #   🚀 独立启动脚本
 │
 ├── config/                         # ⚙️ 配置目录
 │   ├── api_config.py               #   🔑 API 配置（重要！）
@@ -653,6 +703,7 @@ JSON 数据 (data/rules_data.json)
 ## 🔧 技术栈
 
 - **框架**：LangChain
+- **Web UI**：Streamlit
 - **向量数据库**：ChromaDB
 - **Embedding**：BAAI/bge-base-zh-v1.5（中文语义向量）
 - **语言**：Python 3.12
@@ -661,7 +712,7 @@ JSON 数据 (data/rules_data.json)
 
 ## To Do List
 [☑️] 支持更多规则——现已支持pf1e规则
-[]    实现WebUI 
+[☑️] 实现WebUI 
 
 ## 📝 更新日志
 
@@ -675,6 +726,11 @@ JSON 数据 (data/rules_data.json)
 ### v1.1.20251202
 - ☑️ 将dnd规则查询与pf规则查询整合到了一起
 - ☑️ 优化了pf不全书的拆分逻辑，使能查询到之前查询不到的调查员天赋等内容
+### v1.2.20251209
+- ☑️ 新增 Web 图形化界面（基于 Streamlit）
+- ☑️ 支持历史对话记录查看
+- ☑️ 对话自动保存到 `logs/chat_history_*.md`
+- ☑️ 优化启动方式，默认启动 Web UI
 ---
 
 ## 🤝 贡献

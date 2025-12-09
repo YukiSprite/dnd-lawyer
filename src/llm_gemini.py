@@ -23,14 +23,6 @@ except ImportError:
 
 
 def get_gemini_llm() -> BaseChatModel:
-    """
-    [在线执行] 初始化并返回 Gemini 1.5 Flash LLM 实例。
-    
-    使用 api_config.py 中的统一配置
-    
-    Returns:
-        BaseChatModel: LangChain 兼容的 Gemini LLM 实例。
-    """
     print("--- [LLM] 使用 config/api_config.py 统一配置 ---")
     
     # 使用 api_config 的统一接口创建 LLM
