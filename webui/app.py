@@ -1,14 +1,5 @@
 """
 DND 规则助手 - Streamlit Web 界面
-
-启动方式:
-  1. 使用启动脚本（推荐）:
-     ./webui/run.sh          # 默认端口 6008
-     ./webui/run.sh 8080     # 指定端口
-
-  2. 手动运行:
-     conda activate dnd
-     python -m streamlit run webui/app.py --server.port 6008 --server.address 0.0.0.0
 """
 
 import streamlit as st
