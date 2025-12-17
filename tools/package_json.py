@@ -864,23 +864,30 @@ def get_html_soup(html_path: Path) -> Optional[BeautifulSoup]:
         
         logging.debug(f"检测到编码: {encoding} (置信度: {confidence:.2f}) for {html_path}")
         
-        # 如果置信度太低，使用默认编码列表
+        # [2025-12-15 修复] GB2312 编码优先级提升，确保正确解码中文内容
+        # 对于 GB2312/GBK 编码的文件，优先尝试 GB18030（兼容 GB2312 和 GBK）
         if confidence < 0.7:
-            encodings_to_try = ['utf-8', 'gbk', 'gb18030', 'gb2312', 'latin-1']
+            encodings_to_try = ['gb18030', 'gbk', 'gb2312', 'utf-8', 'latin-1']
+        elif encoding and ('gb' in encoding.lower() or 'chinese' in encoding.lower()):
+            # 检测到中文编码，使用更兼容的顺序
+            encodings_to_try = ['gb18030', 'gbk', 'gb2312', 'utf-8']
         else:
-            encodings_to_try = [encoding, 'utf-8', 'gbk', 'gb18030']
+            encodings_to_try = [encoding, 'gb18030', 'utf-8', 'gbk']
         
         # 尝试解码
         for enc in encodings_to_try:
             try:
                 content = raw_data.decode(enc)
-                return BeautifulSoup(content, 'html.parser')
+                # 验证解码结果：检查是否有过多的替换字符（�）
+                if content.count('�') < len(content) * 0.01:  # 替换字符少于 1%
+                    logging.debug(f"成功使用 {enc} 解码 {html_path.name}")
+                    return BeautifulSoup(content, 'html.parser')
             except (UnicodeDecodeError, LookupError):
                 continue
         
-        # 如果所有编码都失败，使用 errors='ignore'
-        logging.warning(f"所有编码尝试失败 {html_path}，使用 UTF-8 with errors='ignore'")
-        content = raw_data.decode('utf-8', errors='ignore')
+        # 如果所有编码都失败，使用 errors='replace' 并警告
+        logging.warning(f"所有编码尝试失败 {html_path}，使用 GB18030 with errors='replace'")
+        content = raw_data.decode('gb18030', errors='replace')
         return BeautifulSoup(content, 'html.parser')
         
     except Exception as e:

@@ -18,6 +18,16 @@ if [ -z "$CHM_FILE" ]; then
     exit 1
 fi
 
+# 清理旧的解压目录和配置文件，确保使用最新的 CHM 文件
+if [ -d "chm_source/extracted" ]; then
+    echo "   清理旧的解压文件..."
+    rm -rf chm_source/extracted
+fi
+if [ -f "config/data_processing.json" ]; then
+    echo "   清理旧的配置文件..."
+    rm -f config/data_processing.json
+fi
+
 echo "   解压: $CHM_FILE"
 extract_chmLib "$CHM_FILE" chm_source/extracted/
 echo "✓ CHM 文件解压完成"

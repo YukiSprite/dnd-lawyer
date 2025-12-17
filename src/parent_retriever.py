@@ -403,15 +403,14 @@ class PathBoostedRetriever(BaseRetriever):
                 if exclusion_keyword in full_path:
                     return -1.0  # 标记为排除
         
-        # 路径加权
+        # 路径加权（累加所有匹配的规则）
+        boosted_score = base_score
         if self.enable_path_boosting and self.path_boost_rules:
             for path_keyword, boost_value in self.path_boost_rules.items():
                 if path_keyword in full_path:
-                    boosted_score = base_score + boost_value
-                    # 确保分数在合理范围内（Chroma 的距离分数可能需要反转）
-                    return boosted_score
+                    boosted_score += boost_value
         
-        return base_score
+        return boosted_score
     
     def _get_relevant_documents(
         self, 

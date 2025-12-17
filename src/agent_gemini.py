@@ -420,62 +420,135 @@ class GeminiAgentExecutor:
             print(f"[Agent] 计算相似度时出错: {e}")
             return 1.0  # 出错时默认通过
     
-    def _calculate_doc_to_doc_similarity(self, doc1: Document, doc2: Document) -> float:
+    def _calculate_path_similarity(self, path1: str, path2: str) -> float:
         """
-        计算两个文档之间的相似度
+        计算两个文档路径的相似度
+        
+        策略：
+        1. 完全相同的路径 -> 1.0
+        2. 同一个源文件（source_file 相同）-> 0.9
+        3. 路径前缀相同的比例越高，相似度越高
+        
+        Args:
+            path1: 文档路径1
+            path2: 文档路径2
+            
+        Returns:
+            路径相似度分数 (0-1)
+        """
+        if not path1 or not path2:
+            return 0.0
+        
+        # 完全相同
+        if path1 == path2:
+            return 1.0
+        
+        # 分割路径为组件
+        parts1 = [p for p in path1.replace('\\', '/').split('/') if p]
+        parts2 = [p for p in path2.replace('\\', '/').split('/') if p]
+        
+        if not parts1 or not parts2:
+            return 0.0
+        
+        # 计算共同前缀长度
+        common_prefix_len = 0
+        for p1, p2 in zip(parts1, parts2):
+            if p1 == p2:
+                common_prefix_len += 1
+            else:
+                break
+        
+        # 计算相似度：共同前缀占较长路径的比例
+        max_len = max(len(parts1), len(parts2))
+        path_similarity = common_prefix_len / max_len
+        
+        return path_similarity
+    
+    def _calculate_doc_to_doc_similarity(
+        self, 
+        doc1: Document, 
+        doc2: Document,
+        content_weight: float = 0.4,
+        path_weight: float = 0.6
+    ) -> Tuple[float, float, float]:
+        """
+        计算两个文档之间的综合相似度（内容 + 路径）
         
         Args:
             doc1: 文档1
             doc2: 文档2
+            content_weight: 内容相似度权重
+            path_weight: 路径相似度权重
             
         Returns:
-            相似度分数 (0-1)
+            (综合相似度, 内容相似度, 路径相似度)
         """
-        if not self.embedding_model:
-            return 0.0
+        # 1. 计算路径相似度
+        path1 = doc1.metadata.get('full_path', '')
+        path2 = doc2.metadata.get('full_path', '')
+        path_similarity = self._calculate_path_similarity(path1, path2)
         
-        try:
-            # 获取两个文档的 embedding
-            doc1_text = doc1.page_content[:1000]  # 限制长度以加快计算
-            doc2_text = doc2.page_content[:1000]
-            
-            doc1_embedding = self.embedding_model.embed_query(doc1_text)
-            doc2_embedding = self.embedding_model.embed_query(doc2_text)
-            
-            # 计算余弦相似度
-            vec1 = np.array(doc1_embedding)
-            vec2 = np.array(doc2_embedding)
-            
-            similarity = np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
-            
-            return float(similarity)
-        except Exception as e:
-            print(f"[Agent] 计算文档间相似度时出错: {e}")
-            return 0.0
+        # 2. 检查是否来自同一源文件
+        source1 = doc1.metadata.get('source_file', '')
+        source2 = doc2.metadata.get('source_file', '')
+        if source1 and source2 and source1 == source2:
+            # 同一源文件，路径相似度至少为 0.9
+            path_similarity = max(path_similarity, 0.9)
+        
+        # 3. 计算内容相似度
+        content_similarity = 0.0
+        if self.embedding_model:
+            try:
+                doc1_text = doc1.page_content[:1000]
+                doc2_text = doc2.page_content[:1000]
+                
+                doc1_embedding = self.embedding_model.embed_query(doc1_text)
+                doc2_embedding = self.embedding_model.embed_query(doc2_text)
+                
+                vec1 = np.array(doc1_embedding)
+                vec2 = np.array(doc2_embedding)
+                
+                content_similarity = float(np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2)))
+            except Exception as e:
+                print(f"[Agent] 计算内容相似度时出错: {e}")
+                content_similarity = 0.0
+        
+        # 4. 计算综合相似度
+        combined_similarity = content_weight * content_similarity + path_weight * path_similarity
+        
+        return combined_similarity, content_similarity, path_similarity
     
     def _deduplicate_and_refill_documents(
         self, 
         query: str, 
         initial_docs: List[Document], 
         target_count: int = 30,
-        similarity_threshold: float = 0.80,
-        max_attempts: int = 3
+        similarity_threshold: float = 0.60,
+        max_attempts: int = 3,
+        content_weight: float = 0.4,
+        path_weight: float = 0.6
     ) -> List[Document]:
         """
         去重相似文档并动态补充，确保返回足够数量的独特文档
         
         策略：
-        1. 对初始文档按相似度去重
-        2. 如果去重后不足目标数量，增加检索数量重新检索
-        3. 对新检索结果去重（包括与已保留文档比较）
-        4. 重复直到达到目标数量或达到最大尝试次数
+        1. 综合考虑内容相似度和路径相似度进行去重
+        2. 路径越相似的文档（来自同一来源）越可能被判定为重复
+        3. 如果去重后不足目标数量，增加检索数量重新检索
+        4. 对新检索结果去重（包括与已保留文档比较）
+        5. 重复直到达到目标数量或达到最大尝试次数
+        
+        相似度计算公式：
+        综合相似度 = content_weight * 内容相似度 + path_weight * 路径相似度
         
         Args:
             query: 用户查询
             initial_docs: 初始检索到的文档列表（已排序）
             target_count: 目标文档数量
-            similarity_threshold: 文档间相似度阈值
+            similarity_threshold: 综合相似度阈值（超过此值视为重复）
             max_attempts: 最大尝试次数
+            content_weight: 内容相似度权重（默认0.4）
+            path_weight: 路径相似度权重（默认0.6，优先考虑路径）
             
         Returns:
             去重并补充后的文档列表
@@ -487,7 +560,8 @@ class GeminiAgentExecutor:
         if not initial_docs:
             return initial_docs
         
-        print(f"[Agent] 正在进行文档去重与动态补充（目标: {target_count} 个独特文档，阈值: {similarity_threshold}）...")
+        print(f"[Agent] 正在进行文档去重与动态补充...")
+        print(f"[Agent] 参数: 目标={target_count}, 阈值={similarity_threshold}, 内容权重={content_weight}, 路径权重={path_weight}")
         
         unique_docs = []
         all_checked_docs = set()  # 使用set存储已检查文档的ID，避免重复检查
@@ -508,13 +582,15 @@ class GeminiAgentExecutor:
             
             # 与已保留的文档比较
             for kept_doc in unique_docs:
-                doc_similarity = self._calculate_doc_to_doc_similarity(current_doc, kept_doc)
+                combined_sim, content_sim, path_sim = self._calculate_doc_to_doc_similarity(
+                    current_doc, kept_doc, content_weight, path_weight
+                )
                 
-                if doc_similarity >= similarity_threshold:
+                if combined_sim >= similarity_threshold:
                     # 发现重复文档
                     kept_title = kept_doc.metadata.get('source_title', '未知')[:40]
                     if i < 10:  # 只显示前10个，避免输出过多
-                        print(f"  ✗ 跳过: {current_title}... (相似度={doc_similarity:.3f}, 重复)")
+                        print(f"  ✗ 跳过: {current_title}... (综合={combined_sim:.3f}, 内容={content_sim:.3f}, 路径={path_sim:.3f})")
                     is_duplicate = True
                     skipped_count += 1
                     break
@@ -603,11 +679,13 @@ class GeminiAgentExecutor:
                     
                     # 与已保留的文档比较
                     for kept_doc in unique_docs:
-                        doc_similarity = self._calculate_doc_to_doc_similarity(doc, kept_doc)
+                        combined_sim, content_sim, path_sim = self._calculate_doc_to_doc_similarity(
+                            doc, kept_doc, content_weight, path_weight
+                        )
                         
-                        if doc_similarity >= similarity_threshold:
+                        if combined_sim >= similarity_threshold:
                             if added_in_round < 5:  # 只显示前几个
-                                print(f"  ✗ 跳过: {current_title}... (相似度={doc_similarity:.3f})")
+                                print(f"  ✗ 跳过: {current_title}... (综合={combined_sim:.3f}, 路径={path_sim:.3f})")
                             is_duplicate = True
                             skipped_count += 1
                             break
@@ -793,17 +871,23 @@ class GeminiAgentExecutor:
                 print(f"[Agent] 重排序已禁用（保留检索器的原始排序）")
             
             # 4. 文档去重并补充：移除内容相似的重复文档，并动态补充（可配置）
+            # 综合考虑内容相似度和路径相似度，路径越相似越可能是重复内容
             if hasattr(config, 'ENABLE_DOCUMENT_DEDUPLICATION') and config.ENABLE_DOCUMENT_DEDUPLICATION:
-                dedup_threshold = getattr(config, 'DOCUMENT_SIMILARITY_THRESHOLD', 0.80)
+                dedup_threshold = getattr(config, 'DOCUMENT_SIMILARITY_THRESHOLD', 0.60)
                 target_doc_count = getattr(config, 'PARENT_RETRIEVER_TOP_K', 30)
                 max_attempts = getattr(config, 'MAX_DEDUP_ATTEMPTS', 3)
+                # 路径相似度权重（越高越重视来源路径的差异）
+                path_weight = getattr(config, 'DEDUP_PATH_WEIGHT', 0.6)
+                content_weight = getattr(config, 'DEDUP_CONTENT_WEIGHT', 0.4)
                 
                 retrieved_docs = self._deduplicate_and_refill_documents(
                     user_input,
                     retrieved_docs,
                     target_count=target_doc_count,
                     similarity_threshold=dedup_threshold,
-                    max_attempts=max_attempts
+                    max_attempts=max_attempts,
+                    content_weight=content_weight,
+                    path_weight=path_weight
                 )
             else:
                 print(f"[Agent] 文档去重已禁用，跳过去重")
